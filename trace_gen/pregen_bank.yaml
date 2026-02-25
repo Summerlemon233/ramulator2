@@ -1,0 +1,24 @@
+# Parallel BA pre-generation config for ramulator.out cache
+pregen:
+  model: GPT-175B
+  ngpu: 8
+  num_hbm: 5
+
+  batch_min: 1
+  batch_max: 16
+
+  seqlen_min: 1
+  seqlen_max: 8192
+  maxlen_floor: 4096
+
+  dhead: 128
+  dbyte: 2
+
+  # 1 = power constrained (pc1), 0 = no power constraint (pc0)
+  # Use "1" if you only run with --powerlimit.
+  power_modes: "1"
+
+  workers: 100
+  flush_every: 200
+  keep_temp: false
+  dry_run: false
