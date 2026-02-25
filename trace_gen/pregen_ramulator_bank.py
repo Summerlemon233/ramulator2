@@ -125,6 +125,21 @@ def parse_power_modes(raw: str) -> List[bool]:
     return dedup
 
 
+def parse_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    s = str(value).strip().lower()
+    if s in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if s in {"0", "false", "f", "no", "n", "off", ""}:
+        return False
+    raise ValueError(f"invalid boolean value: {value}")
+
+
 def normalize_power(value) -> bool:
     if isinstance(value, bool):
         return value
@@ -440,8 +455,8 @@ def main():
     workers = int(pick("workers", args.workers, 100))
     flush_every = int(pick("flush_every", args.flush_every, 200))
     print_failures = int(pick("print_failures", args.print_failures, 5))
-    keep_temp = bool(pick("keep_temp", args.keep_temp, False))
-    dry_run = bool(pick("dry_run", args.dry_run, False))
+    keep_temp = parse_bool(pick("keep_temp", args.keep_temp, False))
+    dry_run = parse_bool(pick("dry_run", args.dry_run, False))
 
     ramulator_out = Path(args.ramulator_out) if args.ramulator_out else (repo_root / "ramulator.out")
     tmp_dir = Path(args.tmp_dir) if args.tmp_dir else (script_dir / "tmp")
