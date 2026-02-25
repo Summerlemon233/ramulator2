@@ -294,14 +294,24 @@ def run_one_task(
         "--output",
         str(trace_path),
     ]
-    subprocess.run(gen_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        subprocess.run(gen_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    except subprocess.CalledProcessError as exc:
+        out = (exc.stdout or "").strip()
+        tail = out[-1200:] if out else "<no stdout>"
+        raise RuntimeError(f"trace_gen failed rc={exc.returncode}: {tail}")
 
     yaml_text = make_yaml_text(trace_path=trace_path, power_constraint=task.power_constraint)
     yaml_path.write_text(yaml_text, encoding="utf-8")
 
     # Run ramulator and parse counters.
     ram_cmd = [str(ramulator_bin), "-f", str(yaml_path)]
-    result = subprocess.run(ram_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        result = subprocess.run(ram_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    except subprocess.CalledProcessError as exc:
+        out = (exc.stdout or "").strip()
+        tail = out[-1200:] if out else "<no stdout>"
+        raise RuntimeError(f"ramulator failed rc={exc.returncode}: {tail}")
     stats = parse_ramulator_output(result.stdout)
 
     if cleanup_temp:
@@ -395,6 +405,7 @@ def main():
     parser.add_argument("--power-modes", type=str, default=None)
     parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--flush-every", type=int, default=None)
+    parser.add_argument("--print-failures", type=int, default=5)
     parser.add_argument("--keep-temp", action="store_true", default=None)
     parser.add_argument("--dry-run", action="store_true", default=None)
     parser.add_argument("--ramulator-out", type=str, default=None)
@@ -428,6 +439,7 @@ def main():
     power_modes = parse_power_modes(str(pick("power_modes", args.power_modes, "1")))
     workers = int(pick("workers", args.workers, 100))
     flush_every = int(pick("flush_every", args.flush_every, 200))
+    print_failures = int(pick("print_failures", args.print_failures, 5))
     keep_temp = bool(pick("keep_temp", args.keep_temp, False))
     dry_run = bool(pick("dry_run", args.dry_run, False))
 
@@ -513,6 +525,8 @@ def main():
                 new_rows.append(row)
             except Exception as exc:
                 failures.append(f"{task.basename}: {exc}")
+                if len(failures) <= max(0, print_failures):
+                    print(f"[PREGEN][FAIL] {failures[-1]}", flush=True)
 
             if done % max(1, flush_every) == 0 or done == len(tasks):
                 merged = merge_rows(existing_rows, new_rows)
