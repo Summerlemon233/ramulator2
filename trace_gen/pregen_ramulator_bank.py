@@ -95,10 +95,65 @@ def model_num_heads(model_name: str) -> int:
         "MT-530B": 128,
         "MT-1008B": 160,
         "OPT-66B": 72,
+        "Qwen3-4B": 32,
+        "Qwen3-32B": 64,
+        "Mistral-Devstral2-123B": 96,
+        "Llama-3.1-405B": 128,
     }
     if model_name not in table:
         raise ValueError(f"unsupported model for num_heads lookup: {model_name}")
     return int(table[model_name])
+
+
+def model_hidden_dim(model_name: str) -> int:
+    table = {
+        "GPT-175B": 12288,
+        "GPT-89B": 12288,
+        "GPT-13B": 5120,
+        "LLAMA-7B": 4096,
+        "LLAMA-65B": 8192,
+        "MT-76B": 10240,
+        "MT-146B": 12288,
+        "MT-310B": 16384,
+        "MT-530B": 20480,
+        "MT-1008B": 25600,
+        "OPT-66B": 9216,
+        "Qwen3-4B": 2560,
+        "Qwen3-32B": 5120,
+        "Mistral-Devstral2-123B": 12288,
+        "Llama-3.1-405B": 16384,
+    }
+    if model_name not in table:
+        raise ValueError(f"unsupported model for hidden-dim lookup: {model_name}")
+    return int(table[model_name])
+
+
+def model_attention_dhead(model_name: str) -> int:
+    # Must match the runtime layer shape built by Transformer, which uses
+    # hdim / num_heads for attention score/context dimensions.
+    return int(model_hidden_dim(model_name) / model_num_heads(model_name))
+
+
+def resolve_dhead(model_name: str, cli_dhead, cfg: Dict) -> int:
+    model_dhead = model_attention_dhead(model_name)
+    if cli_dhead is not None:
+        return int(cli_dhead)
+
+    cfg_dhead = cfg.get("dhead", None)
+    if cfg_dhead is None:
+        return model_dhead
+
+    cfg_dhead = int(cfg_dhead)
+    if cfg_dhead != model_dhead:
+        print(
+            "[PREGEN] ignoring config dhead={} for model={} and using model-derived dhead={}".format(
+                cfg_dhead,
+                model_name,
+                model_dhead,
+            )
+        )
+        return model_dhead
+    return cfg_dhead
 
 
 def parse_power_modes(raw: str) -> List[bool]:
@@ -443,13 +498,13 @@ def main():
 
     model = str(pick("model", args.model, "GPT-175B"))
     ngpu = int(pick("ngpu", args.ngpu, 8))
-    num_hbm = int(pick("num_hbm", args.num_hbm, 5))
+    num_hbm = int(pick("num_hbm", args.num_hbm, 8))
     batch_min = int(pick("batch_min", args.batch_min, 1))
     batch_max = int(pick("batch_max", args.batch_max, 16))
     seqlen_min = int(pick("seqlen_min", args.seqlen_min, 1))
     seqlen_max = int(pick("seqlen_max", args.seqlen_max, 8192))
     maxlen_floor = int(pick("maxlen_floor", args.maxlen_floor, 4096))
-    dhead = int(pick("dhead", args.dhead, 128))
+    dhead = resolve_dhead(model, args.dhead, cfg)
     dbyte = int(pick("dbyte", args.dbyte, 2))
     power_modes = parse_power_modes(str(pick("power_modes", args.power_modes, "1")))
     workers = int(pick("workers", args.workers, 100))
