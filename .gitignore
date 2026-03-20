@@ -4,3 +4,5 @@ ext/
 ramulator2
 *.so
 trace_gen/tmp
+attacc_l*_nattn*_dhead*_dbyte*_pc*.yaml
+attacc_l*_nattn*_dhead*_dbyte*_pc*.trace
