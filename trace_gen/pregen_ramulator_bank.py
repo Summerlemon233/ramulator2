@@ -202,6 +202,87 @@ def normalize_power(value) -> bool:
     return s in {"true", "1", "t", "yes", "y"}
 
 
+def parse_task_mode(raw) -> str:
+    mode = str(raw).strip().lower()
+    if mode not in {"derived", "direct"}:
+        raise ValueError(f"invalid task mode: {raw}")
+    return mode
+
+
+def _split_scalar_or_list(raw) -> List[str]:
+    if isinstance(raw, (list, tuple)):
+        items = raw
+    else:
+        items = [raw]
+    out: List[str] = []
+    for item in items:
+        for token in str(item).split(","):
+            token = token.strip()
+            if token:
+                out.append(token)
+    return out
+
+
+def _dedupe_preserve_order(values):
+    seen = set()
+    out = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def parse_int_values(raw, field_name: str) -> List[int]:
+    tokens = _split_scalar_or_list(raw)
+    values: List[int] = []
+    for token in tokens:
+        if ":" in token:
+            parts = token.split(":")
+            if len(parts) not in {2, 3}:
+                raise ValueError(f"invalid {field_name} range: {token}")
+            start = int(parts[0])
+            stop = int(parts[1])
+            step = int(parts[2]) if len(parts) == 3 else 1
+            if step <= 0:
+                raise ValueError(f"{field_name} range step must be positive: {token}")
+            if stop < start:
+                raise ValueError(f"{field_name} range stop must be >= start: {token}")
+            values.extend(range(start, stop + 1, step))
+        else:
+            values.append(int(token))
+    values = sorted(set(values))
+    if not values:
+        raise ValueError(f"{field_name} cannot be empty")
+    return values
+
+
+def parse_bool_values(raw, field_name: str) -> List[bool]:
+    tokens = _split_scalar_or_list(raw)
+    values = [parse_bool(token) for token in tokens]
+    values = _dedupe_preserve_order(values)
+    if not values:
+        raise ValueError(f"{field_name} cannot be empty")
+    return values
+
+
+def parse_pim_type_values(raw, field_name: str) -> List[str]:
+    tokens = _split_scalar_or_list(raw)
+    values: List[str] = []
+    for token in tokens:
+        pim_type = str(token).strip().upper()
+        if pim_type != "BA":
+            raise ValueError(
+                f"{field_name} currently supports only BA because pregen_ramulator_bank.py uses the bank trace generator"
+            )
+        values.append(pim_type)
+    values = _dedupe_preserve_order(values)
+    if not values:
+        raise ValueError(f"{field_name} cannot be empty")
+    return values
+
+
 def key_from_row(row: Dict[str, str]) -> Tuple[int, int, int, int, str, bool]:
     return (
         int(float(row["L"])),
@@ -321,17 +402,19 @@ class Task:
     nhead: int
     dhead: int
     dbyte: int
+    pim_type: str
     power_constraint: bool
     maxlen: int
 
     @property
     def key(self) -> Tuple[int, int, int, int, str, bool]:
-        return (self.L, self.nhead, self.dhead, self.dbyte, "BA", self.power_constraint)
+        return (self.L, self.nhead, self.dhead, self.dbyte, self.pim_type, self.power_constraint)
 
     @property
     def basename(self) -> str:
         pc = 1 if self.power_constraint else 0
-        return f"attacc_l{self.L}_nattn{self.nhead}_dhead{self.dhead}_dbyte{self.dbyte}_pc{pc}"
+        pim_suffix = "" if self.pim_type == "BA" else f"_pim{self.pim_type.lower()}"
+        return f"attacc_l{self.L}_nattn{self.nhead}_dhead{self.dhead}_dbyte{self.dbyte}_pc{pc}{pim_suffix}"
 
 
 def run_one_task(
@@ -344,6 +427,8 @@ def run_one_task(
     cleanup_temp: bool,
     lock: threading.Lock,
 ) -> Dict[str, str]:
+    if task.pim_type != "BA":
+        raise ValueError(f"unsupported pim_type for bank pregen: {task.pim_type}")
     trace_path = tmp_trace_dir / f"{task.basename}.trace"
     yaml_path = tmp_yaml_dir / f"{task.basename}.yaml"
 
@@ -396,7 +481,7 @@ def run_one_task(
         "nhead": str(task.nhead),
         "dhead": str(task.dhead),
         "dbyte": str(task.dbyte),
-        "pim_type": "BA",
+        "pim_type": task.pim_type,
         "power_constraint": "True" if task.power_constraint else "False",
         "cycle": str(stats["cycle"]),
         "mac": str(stats["mac"]),
@@ -415,7 +500,7 @@ def discover_ramulator_bin(script_dir: Path) -> Path:
     raise FileNotFoundError("cannot find ramulator2 binary under ramulator2/ or ramulator2/build/")
 
 
-def build_tasks(
+def build_tasks_derived(
     seqlen_min: int,
     seqlen_max: int,
     batch_min: int,
@@ -447,6 +532,7 @@ def build_tasks(
                     nhead=int(nhead),
                     dhead=int(dhead),
                     dbyte=int(dbyte),
+                    pim_type="BA",
                     power_constraint=bool(power_mode),
                     maxlen=int(maxlen),
                 )
@@ -456,12 +542,55 @@ def build_tasks(
     return tasks
 
 
+def build_tasks_direct(
+    L_values: List[int],
+    nhead_values: List[int],
+    dhead_values: List[int],
+    dbyte_values: List[int],
+    pim_type_values: List[str],
+    power_constraint_values: List[bool],
+    maxlen_floor: int,
+    existing_keys: Set[Tuple[int, int, int, int, str, bool]],
+) -> List[Task]:
+    tasks: List[Task] = []
+    for L in L_values:
+        if int(L) <= 0:
+            raise ValueError(f"L must be positive: {L}")
+        maxlen = max(maxlen_floor, int(L))
+        for nhead in nhead_values:
+            if int(nhead) <= 0:
+                raise ValueError(f"nhead must be positive: {nhead}")
+            for dhead in dhead_values:
+                if int(dhead) <= 0:
+                    raise ValueError(f"dhead must be positive: {dhead}")
+                for dbyte in dbyte_values:
+                    if int(dbyte) <= 0:
+                        raise ValueError(f"dbyte must be positive: {dbyte}")
+                    for pim_type in pim_type_values:
+                        for power_constraint in power_constraint_values:
+                            task = Task(
+                                L=int(L),
+                                nhead=int(nhead),
+                                dhead=int(dhead),
+                                dbyte=int(dbyte),
+                                pim_type=str(pim_type).upper(),
+                                power_constraint=bool(power_constraint),
+                                maxlen=int(maxlen),
+                            )
+                            if task.key in existing_keys:
+                                continue
+                            tasks.append(task)
+    tasks.sort(key=lambda task: task.key)
+    return tasks
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Parallel pre-generation of BA ramulator cache entries into ramulator.out",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--config", type=str, default="pregen_bank.yaml", help="optional YAML config")
+    parser.add_argument("--task-mode", type=str, default=None, help="derived=model/ngpu/batch expansion, direct=explicit cache-key tuples")
     parser.add_argument("--model", type=str, default=None)
     parser.add_argument("--ngpu", type=int, default=None)
     parser.add_argument("--num-hbm", type=int, default=None)
@@ -470,8 +599,12 @@ def main():
     parser.add_argument("--seqlen-min", type=int, default=None)
     parser.add_argument("--seqlen-max", type=int, default=None)
     parser.add_argument("--maxlen-floor", type=int, default=None)
-    parser.add_argument("--dhead", type=int, default=None)
-    parser.add_argument("--dbyte", type=int, default=None)
+    parser.add_argument("--L", dest="direct_L", type=str, default=None, help="direct mode sequence length(s): scalar, comma list, or start:end[:step]")
+    parser.add_argument("--nhead", dest="direct_nhead", type=str, default=None, help="direct mode heads per PIM die: scalar, comma list, or start:end[:step]")
+    parser.add_argument("--dhead", type=str, default=None)
+    parser.add_argument("--dbyte", type=str, default=None)
+    parser.add_argument("--pim-type", type=str, default=None, help="direct mode pim type; currently BA only")
+    parser.add_argument("--power-constraint", type=str, default=None, help="direct mode power constraint(s): bool/int scalar or comma list")
     parser.add_argument("--power-modes", type=str, default=None)
     parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--flush-every", type=int, default=None)
@@ -496,17 +629,8 @@ def main():
             return cfg[key]
         return default
 
-    model = str(pick("model", args.model, "GPT-175B"))
-    ngpu = int(pick("ngpu", args.ngpu, 8))
-    num_hbm = int(pick("num_hbm", args.num_hbm, 8))
-    batch_min = int(pick("batch_min", args.batch_min, 1))
-    batch_max = int(pick("batch_max", args.batch_max, 16))
-    seqlen_min = int(pick("seqlen_min", args.seqlen_min, 1))
-    seqlen_max = int(pick("seqlen_max", args.seqlen_max, 8192))
+    task_mode = parse_task_mode(pick("task_mode", args.task_mode, "derived"))
     maxlen_floor = int(pick("maxlen_floor", args.maxlen_floor, 4096))
-    dhead = resolve_dhead(model, args.dhead, cfg)
-    dbyte = int(pick("dbyte", args.dbyte, 2))
-    power_modes = parse_power_modes(str(pick("power_modes", args.power_modes, "1")))
     workers = int(pick("workers", args.workers, 100))
     flush_every = int(pick("flush_every", args.flush_every, 200))
     print_failures = int(pick("print_failures", args.print_failures, 5))
@@ -524,40 +648,90 @@ def main():
     trace_gen_script = script_dir / "gen_trace_attacc_bank.py"
     ramulator_bin = discover_ramulator_bin(script_dir)
 
-    num_heads = model_num_heads(model)
     existing_rows = read_cache_rows(ramulator_out)
     existing_keys = set(key_from_row(r) for r in existing_rows)
 
-    tasks = build_tasks(
-        seqlen_min=seqlen_min,
-        seqlen_max=seqlen_max,
-        batch_min=batch_min,
-        batch_max=batch_max,
-        dhead=dhead,
-        dbyte=dbyte,
-        num_heads=num_heads,
-        ngpu=ngpu,
-        num_hbm=num_hbm,
-        power_modes=power_modes,
-        maxlen_floor=maxlen_floor,
-        existing_keys=existing_keys,
-    )
-
     print("[PREGEN] config_path={}".format(config_path if config_path.exists() else "None"))
-    print(
-        "[PREGEN] model={} num_heads={} ngpu={} num_hbm={} batches=[{},{}] seqlen=[{},{}] maxlen_floor={} power_modes={}".format(
-            model,
-            num_heads,
-            ngpu,
-            num_hbm,
-            batch_min,
-            batch_max,
-            seqlen_min,
-            seqlen_max,
-            maxlen_floor,
-            [int(v) for v in power_modes],
+    print("[PREGEN] task_mode={}".format(task_mode))
+
+    if task_mode == "derived":
+        model = str(pick("model", args.model, "GPT-175B"))
+        ngpu = int(pick("ngpu", args.ngpu, 8))
+        num_hbm = int(pick("num_hbm", args.num_hbm, 8))
+        batch_min = int(pick("batch_min", args.batch_min, 1))
+        batch_max = int(pick("batch_max", args.batch_max, 16))
+        seqlen_min = int(pick("seqlen_min", args.seqlen_min, 1))
+        seqlen_max = int(pick("seqlen_max", args.seqlen_max, 8192))
+        dhead = resolve_dhead(model, args.dhead, cfg)
+        dbyte = int(pick("dbyte", args.dbyte, 2))
+        power_modes = parse_power_modes(str(pick("power_modes", args.power_modes, "1")))
+        num_heads = model_num_heads(model)
+        tasks = build_tasks_derived(
+            seqlen_min=seqlen_min,
+            seqlen_max=seqlen_max,
+            batch_min=batch_min,
+            batch_max=batch_max,
+            dhead=dhead,
+            dbyte=dbyte,
+            num_heads=num_heads,
+            ngpu=ngpu,
+            num_hbm=num_hbm,
+            power_modes=power_modes,
+            maxlen_floor=maxlen_floor,
+            existing_keys=existing_keys,
         )
-    )
+        print(
+            "[PREGEN] model={} num_heads={} ngpu={} num_hbm={} batches=[{},{}] seqlen=[{},{}] maxlen_floor={} power_modes={}".format(
+                model,
+                num_heads,
+                ngpu,
+                num_hbm,
+                batch_min,
+                batch_max,
+                seqlen_min,
+                seqlen_max,
+                maxlen_floor,
+                [int(v) for v in power_modes],
+            )
+        )
+    else:
+        L_raw = pick("L", args.direct_L, None)
+        nhead_raw = pick("nhead", args.direct_nhead, None)
+        if L_raw is None:
+            raise ValueError("direct mode requires L via --L or pregen.L in config")
+        if nhead_raw is None:
+            raise ValueError("direct mode requires nhead via --nhead or pregen.nhead in config")
+
+        L_values = parse_int_values(L_raw, "L")
+        nhead_values = parse_int_values(nhead_raw, "nhead")
+        dhead_values = parse_int_values(pick("dhead", args.dhead, 80), "dhead")
+        dbyte_values = parse_int_values(pick("dbyte", args.dbyte, 2), "dbyte")
+        pim_type_values = parse_pim_type_values(pick("pim_type", args.pim_type, "BA"), "pim_type")
+        power_constraint_values = parse_bool_values(
+            pick("power_constraint", args.power_constraint, 1),
+            "power_constraint",
+        )
+        tasks = build_tasks_direct(
+            L_values=L_values,
+            nhead_values=nhead_values,
+            dhead_values=dhead_values,
+            dbyte_values=dbyte_values,
+            pim_type_values=pim_type_values,
+            power_constraint_values=power_constraint_values,
+            maxlen_floor=maxlen_floor,
+            existing_keys=existing_keys,
+        )
+        print(
+            "[PREGEN] direct L={} nhead={} dhead={} dbyte={} pim_type={} power_constraint={} maxlen_floor={}".format(
+                L_values,
+                nhead_values,
+                dhead_values,
+                dbyte_values,
+                pim_type_values,
+                [int(v) for v in power_constraint_values],
+                maxlen_floor,
+            )
+        )
     print("[PREGEN] ramulator_out={} existing_rows={}".format(ramulator_out, len(existing_rows)))
     print("[PREGEN] tmp_dir={} workers={}".format(tmp_dir, workers))
     print("[PREGEN] todo_tasks={}".format(len(tasks)))

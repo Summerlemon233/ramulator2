@@ -1,24 +1,33 @@
 # Parallel BA pre-generation config for ramulator.out cache
 pregen:
-  model: GPT-175B
-  ngpu: 8
-  num_hbm: 5
+  task_mode: direct
 
-  batch_min: 1
-  batch_max: 16
-
-  seqlen_min: 1
-  seqlen_max: 8192
-  maxlen_floor: 4096
-
-  dhead: 128
+  # Direct cache-key mode.
+  # Accepts a scalar, comma list, or inclusive start:end[:step] range.
+  L: 1:8192
+  nhead: 16
+  dhead: 80
   dbyte: 2
+  pim_type: BA
 
-  # 1 = power constrained (pc1), 0 = no power constraint (pc0)
-  # Use "1" if you only run with --powerlimit.
-  power_modes: "1"
+  # 1 = power constrained (pc1), 0 = no power constraint (pc0).
+  power_constraint: "1"
+  maxlen_floor: 4096
 
   workers: 100
   flush_every: 200
   keep_temp: false
   dry_run: false
+
+  # Legacy derived-mode example:
+  # task_mode: derived
+  # model: GPT-175B
+  # ngpu: 8
+  # num_hbm: 8
+  # batch_min: 1
+  # batch_max: 16
+  # seqlen_min: 1
+  # seqlen_max: 8192
+  # dhead: 128
+  # dbyte: 2
+  # power_modes: "1"
