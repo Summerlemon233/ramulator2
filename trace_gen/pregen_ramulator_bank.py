@@ -800,6 +800,7 @@ def main():
         fail_log = tmp_dir / "pregen_failures.log"
         fail_log.write_text("\n".join(failures) + "\n", encoding="utf-8")
         print(f"[PREGEN] failures logged to {fail_log}")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
